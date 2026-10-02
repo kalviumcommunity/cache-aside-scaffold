@@ -1,5 +1,7 @@
 import { redis } from "../redis.js";
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * cached(key, ttl, fetcher) — YOUR JOB.
  *
@@ -20,5 +22,30 @@ import { redis } from "../redis.js";
  */
 export async function cached(key, ttl, fetcher) {
   // TODO: replace this naive passthrough with cache-aside + SET ... NX EX lock.
+  // 1. cache-aside read. redis.get returns null on a miss; the string "null"
+  //    is a cached null value (e.g. unknown user), so compare to null explicitly.
+  const hit = await redis.get(key);
+  if (hit !== null) return JSON.parse(hit);
+
+  // 2. miss: try to become the single winner
+  const lockKey = "lock:" + key;
+  const won = await redis.set(lockKey, "1", "EX", 5, "NX");
+
+  if (won) {
+    try {
+      const data = await fetcher();
+      await redis.set(key, JSON.stringify(data ?? null), "EX", ttl);
+      return data;
+    } finally {
+      await redis.del(lockKey); // release even if the fetcher threw
+    }
+  }
+
+  // 3. losers: wait for the winner to fill the cache
+  for (let i = 0; i < 100; i++) {
+    await sleep(50);
+    const again = await redis.get(key);
+    if (again !== null) return JSON.parse(again);
+  }
   return fetcher();
 }

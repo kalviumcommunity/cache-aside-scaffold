@@ -4,6 +4,8 @@ import { cached } from "../cache/cached.js";
 import { invalidate } from "../cache/invalidation.js";
 
 const router = Router();
+const FEED_TTL = 30; // seconds: feed changes fast
+
 
 // READ (hot): GET /posts/feed?page=1&sort=new|hot
 // TODO: wrap the DB read in cached(key, ttl, fetcher).
@@ -13,7 +15,8 @@ router.get("/posts/feed", async (req, res) => {
   const page = Number(req.query.page ?? 1);
   const sort = req.query.sort === "hot" ? "hot" : "new";
 
-  const feed = await (async () => {
+  const key = await keys.feed(page, sort);
+  const feed = await cached(key, FEED_TTL, async () => {
     await slowQuery(); // simulates a heavy, disk-backed query
     return prisma.post.findMany({
       orderBy: sort === "hot" ? { likes: "desc" } : { createdAt: "desc" },
@@ -21,7 +24,7 @@ router.get("/posts/feed", async (req, res) => {
       take: 20,
       include: { author: true },
     });
-  })();
+  });
 
   res.json(feed);
 });
@@ -30,7 +33,7 @@ router.get("/posts/feed", async (req, res) => {
 // TODO: after creating the post, invalidate the cached feed.
 router.post("/posts", async (req, res) => {
   const post = await prisma.post.create({ data: req.body });
-  // TODO: await invalidate.onNewPost();
+  await invalidate.onNewPost();
   res.status(201).json(post);
 });
 

@@ -19,11 +19,23 @@ import { redis } from "../redis.js";
  *   - a version counter in the key (INCR on write), or
  *   - an explicit dependency list of live feed keys.
  */
+const FEED_VERSION = "posts:feed:version";
+
+export const keys = {
+  feed: async (page, sort) => {
+    const v = (await redis.get(FEED_VERSION)) ?? "0";
+    return `posts:feed:v${v}:page=${page}:sort=${sort}`;
+  },
+  user: (id) => `user:${id}`,
+};
+
 export const invalidate = {
   onNewPost: async () => {
     // TODO: DEL the cached feed key(s).
+    await redis.incr(FEED_VERSION); // O(1), invalidates every page + sort
   },
   onProfileEdit: async (userId) => {
     // TODO: DEL only this user's cached profile key.
+    await redis.del(keys.user(userId)); // only this user
   },
 };
