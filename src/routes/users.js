@@ -5,32 +5,45 @@ import { invalidate } from "../cache/invalidation.js";
 
 const router = Router();
 
-// READ: GET /users/:id
-// TODO: wrap the DB read in cached(key, ttl, fetcher).
-//   - Key MUST include the :id path param.
-//   - Choose a TTL (seconds) and justify it in the README.
-router.get("/users/:id", async (req, res) => {
-  const user = await (async () => {
-    await slowQuery(); // simulates a heavy, disk-backed query
-    return prisma.user.findUnique({
-      where: { id: req.params.id },
-      include: { posts: true },
-    });
-  })();
+router.get("/users/:id", async (req, res, next) => {
+  try {
+    const userId = req.params.id;
+    const key = `user:${userId}`;
 
-  if (!user) return res.status(404).json({ error: "not found" });
-  res.json(user);
+    const user = await cached(key, 300, async () => {
+      await slowQuery();
+
+      return prisma.user.findUnique({
+        where: { id: userId },
+        include: { posts: true },
+      });
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "not found" });
+    }
+
+    res.json(user);
+  } catch (error) {
+    next(error);
+  }
 });
 
-// WRITE: PUT /users/:id  { name?, bio? }
-// TODO: after updating, invalidate ONLY this user's cached profile.
-router.put("/users/:id", async (req, res) => {
-  const user = await prisma.user.update({
-    where: { id: req.params.id },
-    data: req.body,
-  });
-  // TODO: await invalidate.onProfileEdit(req.params.id);
-  res.json(user);
+router.put("/users/:id", async (req, res, next) => {
+  try {
+    const userId = req.params.id;
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: req.body,
+    });
+
+    await invalidate.onProfileEdit(userId);
+
+    res.json(user);
+  } catch (error) {
+    next(error);
+  }
 });
 
 export default router;
