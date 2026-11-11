@@ -74,24 +74,25 @@ Run each **before** caching (or against a cold cache) and **after** caching is w
 
 | Endpoint | TTL | Why (staleness tolerance) |
 |---|---|---|
-| `GET /posts/feed` | `___s` | _e.g. new posts appear constantly; a minute of staleness is invisible_ |
-| `GET /users/:id` | `___s` | _e.g. profiles rarely change; a few minutes is fine_ |
+| `GET /posts/feed` | `30s` | High-churn endpoint where posts and ranking shifts happen frequently. A 30s TTL keeps the feed feeling live while shielding the database under high-concurrency spikes. Staleness under 30s is imperceptible to users, and explicit invalidation ensures new writes immediately refresh top posts. |
+| `GET /users/:id` | `300s` | User profiles (name, bio) are updated very infrequently compared to reads. A 5-minute TTL provides high cache hit ratios. Explicit invalidation on `PUT /users/:id` ensures any actual edit reflects immediately. |
 
 ### Invalidation rules
 
 | Write | Clears |
 |---|---|
-| `POST /posts` | `___` |
-| `PUT /users/:id` | `___` |
+| `POST /posts` | Bumps feed version counter (`INCR posts:feed:version`), immediately rendering all previous feed page/sort cache keys obsolete |
+| `PUT /users/:id` | `users:<id>` (only that specific user's cached profile) |
 
-**How I handled the paginated feed (no `KEYS`):** _explain your choice._
+**How I handled the paginated feed (no `KEYS`):**  
+Used a **Version Counter** pattern (`posts:feed:version`). Cache keys for feed pages are parameterized with the version: `posts:feed:v<version>:page:<page>:sort:<sort>`. On `POST /posts`, Redis atomically increments the version counter via `INCR posts:feed:version`. Future feed reads automatically evaluate against the new version, rendering all existing cached pages instantly unreachable without running an `O(N)` `KEYS` or `SCAN` command that blocks single-threaded Redis. Orphaned keys with the old version self-expire naturally via their 30-second TTL.
 
 ### Results (before → after)
 
 | Endpoint | req/s before | req/s after | p50 before → after | p99 before → after |
 |---|---|---|---|---|
-| `GET /posts/feed` | | | | |
-| `GET /users/:id` | | | | |
+| `GET /posts/feed` | 736 | 4491 | 62.8ms → 7.8ms | 113.6ms → 47.3ms |
+| `GET /users/:id` | 799 | 5262 | 58.0ms → 5.4ms | 110.6ms → 46.2ms |
 
 _Expect req/s up 5–50× and **p99 collapsing toward p50** once the cache is warm._
 
