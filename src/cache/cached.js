@@ -1,24 +1,52 @@
+
 import { redis } from "../redis.js";
 
 /**
- * cached(key, ttl, fetcher) — YOUR JOB.
- *
- * Turn this into a cache-aside helper WITH stampede protection.
- * Right now it does NO caching — it just runs the fetcher every time,
- * so the endpoints work but are slow and unprotected.
- *
- * Implement, in order:
- *   1. redis.get(key) — on a HIT, JSON.parse and return it (no DB).
- *   2. On a MISS, take a stampede lock so only ONE request does the work:
- *        const got = await redis.set("lock:" + key, "1", "NX", "EX", 5);
- *      - if got: run fetcher(), SET the key with an EX ttl, DEL the lock, return.
- *      - else (someone else holds the lock): sleep ~50ms, re-read the cache,
- *        return that (or fall back to fetcher() if still empty).
- *
- * The worked reference is the cached() helper from the lesson — study it,
- * then write your own here.
+ * cached(key, ttl, fetcher)
+ * Cache-aside helper with stampede protection.
  */
 export async function cached(key, ttl, fetcher) {
-  // TODO: replace this naive passthrough with cache-aside + SET ... NX EX lock.
-  return fetcher();
+
+  // 1. Check Redis cache
+  const cachedData = await redis.get(key);
+
+  // 2. If cache HIT, return cached data
+  if (cachedData !== null) {
+    return JSON.parse(cachedData);
+  }
+
+  // 3. Try to acquire the lock
+  const got = await redis.set("lock:" + key, "1", "NX", "EX", 5);
+
+  if (got) {
+    try {
+      // 4. Fetch data from database
+      const data = await fetcher();
+
+      // 5. Store data in Redis with TTL
+      await redis.set(key, JSON.stringify(data), "EX", ttl);
+
+      // 6. Return fetched data
+      return data;
+
+    } finally {
+      // 7. Release the lock
+      await redis.del("lock:" + key);
+    }
+
+  } else {
+
+    // 8. Wait for 50 milliseconds
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    // 9. Check Redis cache again
+    const retryData = await redis.get(key);
+
+    if (retryData !== null) {
+      return JSON.parse(retryData);
+    }
+
+    // 10. Fallback to database
+    return fetcher();
+  }
 }
