@@ -1,24 +1,47 @@
 import { redis } from "../redis.js";
 
-/**
- * cached(key, ttl, fetcher) — YOUR JOB.
- *
- * Turn this into a cache-aside helper WITH stampede protection.
- * Right now it does NO caching — it just runs the fetcher every time,
- * so the endpoints work but are slow and unprotected.
- *
- * Implement, in order:
- *   1. redis.get(key) — on a HIT, JSON.parse and return it (no DB).
- *   2. On a MISS, take a stampede lock so only ONE request does the work:
- *        const got = await redis.set("lock:" + key, "1", "NX", "EX", 5);
- *      - if got: run fetcher(), SET the key with an EX ttl, DEL the lock, return.
- *      - else (someone else holds the lock): sleep ~50ms, re-read the cache,
- *        return that (or fall back to fetcher() if still empty).
- *
- * The worked reference is the cached() helper from the lesson — study it,
- * then write your own here.
- */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const LOCK_TTL_S = 5;
+const POLL_MS = 50;
+const MAX_POLLS = 40;
+
 export async function cached(key, ttl, fetcher) {
-  // TODO: replace this naive passthrough with cache-aside + SET ... NX EX lock.
+  let hit;
+  try {
+    hit = await redis.get(key);
+  } catch (e) {
+    console.error("[cache] get failed, bypassing cache:", e.message);
+    return fetcher();
+  }
+  if (hit !== null) return JSON.parse(hit);
+
+  const lockKey = "lock:" + key;
+  let won;
+  try {
+    won = await redis.set(lockKey, "1", "NX", "EX", LOCK_TTL_S);
+  } catch (e) {
+    console.error("[cache] lock failed, bypassing cache:", e.message);
+    return fetcher();
+  }
+
+  if (won) {
+    try {
+      const value = await fetcher();
+      if (value !== null && value !== undefined) {
+        await redis.set(key, JSON.stringify(value), "EX", ttl);
+      }
+      return value;
+    } finally {
+      await redis.del(lockKey).catch(() => {});
+    }
+  }
+
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await sleep(POLL_MS);
+    const v = await redis.get(key);
+    if (v !== null) return JSON.parse(v);
+    if (!(await redis.exists(lockKey))) break;
+  }
   return fetcher();
 }
